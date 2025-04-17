@@ -3,12 +3,25 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "mcp-server-snowflake"
+name = "mcp_snowflake"
 version = "0.2.0"
 description = "MCP server for performing read-only operations against Snowflake"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
+authors = [
+    {name = "MCP Server Team"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules"
+]
+keywords = ["snowflake", "mcp", "claude", "database", "sql"]
 dependencies = [
     "snowflake-connector-python>=3.8.0",
     "pydantic>=2.4.2",
@@ -19,8 +32,12 @@ dependencies = [
     "sqlglot>=11.5.5"
 ]
 
+[project.urls]
+Repository = "https://github.com/dynamike/mcp-server-snowflake"
+Issues = "https://github.com/dynamike/mcp-server-snowflake/issues"
+
 [project.scripts]
-snowflake-mcp = "mcp_server_snowflake.main:run_stdio_server"
+mcp-snowflake = "mcp_server_snowflake.main:run_stdio_server"
 
 [project.optional-dependencies]
 dev = [
@@ -46,3 +63,6 @@ disallow_incomplete_defs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["mcp_server_snowflake"]
