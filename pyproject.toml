@@ -28,6 +28,7 @@ dev = [
     "pytest>=7.4.0",
     "ruff>=0.1.0",
     "mypy>=1.6.0",
+    "pre-commit>=4.2.0",
 ]
 
 [tool.ruff]
@@ -35,7 +36,7 @@ line-length = 88
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I"]
+select = ["E", "F", "I", "B", "C4", "SIM", "TCH", "UP", "N", "PL", "RUF"]
 ignore = ["E501"]  # Ignore line too long errors
 
 [tool.mypy]
