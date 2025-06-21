@@ -1,0 +1,174 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: snowflake-mcp-server
+  namespace: snowflake-mcp
+  labels:
+    app: snowflake-mcp-server
+    version: "1.0.0"
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: snowflake-mcp-server
+  template:
+    metadata:
+      labels:
+        app: snowflake-mcp-server
+        version: "1.0.0"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8001"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: snowflake-mcp-service-account
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+      - name: snowflake-mcp-server
+        image: snowflake-mcp-server:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8000
+          protocol: TCP
+        - name: metrics
+          containerPort: 8001
+          protocol: TCP
+        env:
+        # Load configuration from ConfigMap
+        - name: MCP_SERVER_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: snowflake-mcp-config
+              key: MCP_SERVER_HOST
+        - name: MCP_SERVER_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: snowflake-mcp-config
+              key: MCP_SERVER_PORT
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: snowflake-mcp-config
+              key: LOG_LEVEL
+        - name: CONNECTION_POOL_MIN_SIZE
+          valueFrom:
+            configMapKeyRef:
+              name: snowflake-mcp-config
+              key: CONNECTION_POOL_MIN_SIZE
+        - name: CONNECTION_POOL_MAX_SIZE
+          valueFrom:
+            configMapKeyRef:
+              name: snowflake-mcp-config
+              key: CONNECTION_POOL_MAX_SIZE
+        - name: ENABLE_MONITORING
+          valueFrom:
+            configMapKeyRef:
+              name: snowflake-mcp-config
+              key: ENABLE_MONITORING
+        - name: METRICS_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: snowflake-mcp-config
+              key: METRICS_PORT
+        - name: ENABLE_RATE_LIMITING
+          valueFrom:
+            configMapKeyRef:
+              name: snowflake-mcp-config
+              key: ENABLE_RATE_LIMITING
+        - name: RATE_LIMIT_REQUESTS_PER_MINUTE
+          valueFrom:
+            configMapKeyRef:
+              name: snowflake-mcp-config
+              key: RATE_LIMIT_REQUESTS_PER_MINUTE
+        
+        # Load secrets
+        - name: SNOWFLAKE_ACCOUNT
+          valueFrom:
+            secretKeyRef:
+              name: snowflake-mcp-secrets
+              key: SNOWFLAKE_ACCOUNT
+        - name: SNOWFLAKE_USER
+          valueFrom:
+            secretKeyRef:
+              name: snowflake-mcp-secrets
+              key: SNOWFLAKE_USER
+        - name: SNOWFLAKE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: snowflake-mcp-secrets
+              key: SNOWFLAKE_PASSWORD
+        - name: SNOWFLAKE_WAREHOUSE
+          valueFrom:
+            secretKeyRef:
+              name: snowflake-mcp-secrets
+              key: SNOWFLAKE_WAREHOUSE
+        - name: SNOWFLAKE_DATABASE
+          valueFrom:
+            secretKeyRef:
+              name: snowflake-mcp-secrets
+              key: SNOWFLAKE_DATABASE
+        - name: SNOWFLAKE_SCHEMA
+          valueFrom:
+            secretKeyRef:
+              name: snowflake-mcp-secrets
+              key: SNOWFLAKE_SCHEMA
+        
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 3
+        
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: 1000m
+            memory: 1024Mi
+        
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+        - name: logs-volume
+          mountPath: /app/logs
+        
+      volumes:
+      - name: tmp-volume
+        emptyDir: {}
+      - name: logs-volume
+        emptyDir: {}
+      
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30

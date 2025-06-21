@@ -13,13 +13,15 @@ The primary components are:
   auth or browser auth
 """
 
+import asyncio
 import contextlib
 import os
 import threading
 import time
+import warnings
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple
 
 import snowflake.connector
 from cryptography.hazmat.backends import default_backend
@@ -28,6 +30,9 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from pydantic import BaseModel, ValidationInfo, field_validator
 from snowflake.connector import SnowflakeConnection
 from snowflake.connector.errors import DatabaseError, OperationalError
+
+if TYPE_CHECKING:
+    from .async_pool import AsyncConnectionPool
 
 
 class AuthType(str, Enum):
@@ -307,5 +312,62 @@ def get_snowflake_connection(config: SnowflakeConfig) -> SnowflakeConnection:
     return connection
 
 
+async def create_async_connection(config: SnowflakeConfig) -> SnowflakeConnection:
+    """Create a Snowflake connection asynchronously."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, get_snowflake_connection, config)
+
+
+async def test_connection_health(connection: SnowflakeConnection) -> bool:
+    """Test if a connection is healthy asynchronously."""
+    try:
+        loop = asyncio.get_event_loop()
+        
+        def _test_connection() -> bool:
+            cursor = connection.cursor()
+            cursor.execute("SELECT 1")
+            result = cursor.fetchone()
+            cursor.close()
+            return result is not None
+        
+        return await loop.run_in_executor(None, _test_connection)
+    except Exception:
+        return False
+
+
+class LegacyConnectionManager:
+    """Legacy connection manager for backwards compatibility."""
+    
+    def __init__(self) -> None:
+        self._pool: Optional["AsyncConnectionPool"] = None
+        self._config: Optional[SnowflakeConfig] = None
+    
+    def initialize(self, config: SnowflakeConfig) -> None:
+        """Initialize with async pool."""
+        self._config = config
+        # Pool initialization happens asynchronously
+    
+    async def get_async_connection(self) -> Any:
+        """Get connection from async pool."""
+        if self._pool is None:
+            from .async_pool import get_connection_pool
+            self._pool = await get_connection_pool()
+        
+        return self._pool.acquire()
+    
+    def get_connection(self) -> SnowflakeConnection:
+        """Legacy sync method - deprecated."""
+        warnings.warn(
+            "Synchronous get_connection is deprecated. Use get_async_connection().",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        # Fallback implementation for compatibility
+        if self._config is None:
+            raise ValueError("Connection manager not initialized")
+        return get_snowflake_connection(self._config)
+
+
 # Create a singleton instance for convenience
 connection_manager = SnowflakeConnectionManager()
+legacy_connection_manager = LegacyConnectionManager()

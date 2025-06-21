@@ -10,7 +10,11 @@ The server is designed to be used with Claude Desktop as an MCP server, providin
 Claude with secure, controlled access to Snowflake data for analysis and reporting.
 """
 
+import logging
 import os
+from contextlib import asynccontextmanager
+from datetime import timedelta
+from functools import wraps
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 import anyio
@@ -21,6 +25,18 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from sqlglot.errors import ParseError
 
+from snowflake_mcp_server.utils.async_database import (
+    get_isolated_database_ops,
+    get_transactional_database_ops,
+)
+from snowflake_mcp_server.utils.async_pool import ConnectionPoolConfig
+from snowflake_mcp_server.utils.contextual_logging import (
+    log_request_complete,
+    log_request_error,
+    log_request_start,
+    setup_server_logging,
+)
+from snowflake_mcp_server.utils.request_context import RequestContext, request_context
 from snowflake_mcp_server.utils.snowflake_conn import (
     AuthType,
     SnowflakeConfig,
@@ -29,6 +45,8 @@ from snowflake_mcp_server.utils.snowflake_conn import (
 
 # Load environment variables from .env file
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 # Initialize Snowflake configuration from environment variables
@@ -58,6 +76,71 @@ def get_snowflake_config() -> SnowflakeConfig:
     return config
 
 
+def get_pool_config() -> ConnectionPoolConfig:
+    """Load connection pool configuration from environment."""
+    return ConnectionPoolConfig(
+        min_size=int(os.getenv("SNOWFLAKE_POOL_MIN_SIZE", "2")),
+        max_size=int(os.getenv("SNOWFLAKE_POOL_MAX_SIZE", "10")),
+        max_inactive_time=timedelta(minutes=int(os.getenv("SNOWFLAKE_POOL_MAX_INACTIVE_MINUTES", "30"))),
+        health_check_interval=timedelta(minutes=int(os.getenv("SNOWFLAKE_POOL_HEALTH_CHECK_MINUTES", "5"))),
+        connection_timeout=float(os.getenv("SNOWFLAKE_POOL_CONNECTION_TIMEOUT", "30.0")),
+        retry_attempts=int(os.getenv("SNOWFLAKE_POOL_RETRY_ATTEMPTS", "3")),
+    )
+
+
+async def initialize_async_infrastructure() -> None:
+    """Initialize async connection infrastructure."""
+    snowflake_config = get_snowflake_config()
+    pool_config = get_pool_config()
+    
+    from .utils.async_pool import initialize_connection_pool
+    
+    await initialize_connection_pool(snowflake_config, pool_config)
+
+
+@asynccontextmanager
+async def get_database_connection() -> Any:
+    """Dependency injection for database connections."""
+    from .utils.async_pool import get_connection_pool
+    
+    pool = await get_connection_pool()
+    async with pool.acquire() as connection:
+        yield connection
+
+
+def with_request_isolation(tool_name: str) -> Any:
+    """Decorator to add request isolation to MCP handlers."""
+    def decorator(handler_func: Any) -> Any:
+        @wraps(handler_func)
+        async def wrapper(name: str, arguments: Optional[Dict[str, Any]] = None) -> Any:
+            # Extract client ID from arguments or headers if available
+            client_id = arguments.get("_client_id", "unknown") if arguments else "unknown"
+            
+            async with request_context(tool_name, arguments or {}, client_id) as ctx:
+                try:
+                    # Log request start
+                    log_request_start(ctx.request_id, tool_name, client_id, arguments or {})
+                    
+                    # Call original handler with request context (ctx is guaranteed to be RequestContext)
+                    result = await handler_func(name, arguments, ctx)
+                    
+                    # Log successful completion
+                    duration = ctx.get_duration_ms()
+                    if duration is not None:
+                        log_request_complete(ctx.request_id, duration, ctx.metrics.queries_executed)
+                    
+                    return result
+                    
+                except Exception as e:
+                    # Log error and add to context
+                    log_request_error(ctx.request_id, e, f"handler_{tool_name}")
+                    ctx.add_error(e, f"handler_{tool_name}")
+                    # Re-raise to maintain original error handling
+                    raise
+        return wrapper
+    return decorator
+
+
 # Initialize the connection manager at startup
 def init_connection_manager() -> None:
     """Initialize the connection manager with Snowflake config."""
@@ -82,37 +165,30 @@ def create_server() -> Server:
 
 
 # Snowflake query handler functions
+@with_request_isolation("list_databases")
 async def handle_list_databases(
-    name: str, arguments: Optional[Dict[str, Any]] = None
+    name: str, 
+    arguments: Optional[Dict[str, Any]] = None,
+    request_ctx: RequestContext = None  # type: ignore
 ) -> Sequence[
     Union[mcp_types.TextContent, mcp_types.ImageContent, mcp_types.EmbeddedResource]
 ]:
-    """Tool handler to list all accessible Snowflake databases."""
+    """Tool handler to list all accessible Snowflake databases with isolation."""
     try:
-        # Get Snowflake connection from connection manager
-        conn = connection_manager.get_connection()
-
-        # Execute query
-        cursor = conn.cursor()
-        cursor.execute("SHOW DATABASES")
-
-        # Process results
-        databases = []
-        for row in cursor:
-            databases.append(row[1])  # Database name is in the second column
-
-        cursor.close()
-        # Don't close the connection, just the cursor
-
-        # Return formatted content
-        return [
-            mcp_types.TextContent(
-                type="text",
-                text="Available Snowflake databases:\n" + "\n".join(databases),
-            )
-        ]
+        async with get_isolated_database_ops(request_ctx) as db_ops:
+            results, _ = await db_ops.execute_query_isolated("SHOW DATABASES")
+            
+            databases = [row[1] for row in results]
+            
+            return [
+                mcp_types.TextContent(
+                    type="text",
+                    text="Available Snowflake databases:\n" + "\n".join(databases),
+                )
+            ]
 
     except Exception as e:
+        logger.error(f"Error querying databases: {e}")
         return [
             mcp_types.TextContent(
                 type="text", text=f"Error querying databases: {str(e)}"
@@ -120,17 +196,16 @@ async def handle_list_databases(
         ]
 
 
+@with_request_isolation("list_views")
 async def handle_list_views(
-    name: str, arguments: Optional[Dict[str, Any]] = None
+    name: str, 
+    arguments: Optional[Dict[str, Any]] = None,
+    request_ctx: RequestContext = None  # type: ignore
 ) -> Sequence[
     Union[mcp_types.TextContent, mcp_types.ImageContent, mcp_types.EmbeddedResource]
 ]:
-    """Tool handler to list views in a specified database and schema."""
+    """Tool handler to list views with request isolation."""
     try:
-        # Get Snowflake connection from connection manager
-        conn = connection_manager.get_connection()
-
-        # Extract arguments
         database = arguments.get("database") if arguments else None
         schema = arguments.get("schema") if arguments else None
 
@@ -141,69 +216,59 @@ async def handle_list_views(
                 )
             ]
 
-        # Use the provided database and schema, or use default schema
-        if database:
-            conn.cursor().execute(f"USE DATABASE {database}")
-        if schema:
-            conn.cursor().execute(f"USE SCHEMA {schema}")
-        else:
-            # Get the current schema
-            cursor = conn.cursor()
-            cursor.execute("SELECT CURRENT_SCHEMA()")
-            schema_result = cursor.fetchone()
-            if schema_result:
-                schema = schema_result[0]
+        async with get_isolated_database_ops(request_ctx) as db_ops:
+            # Set database context in isolation
+            await db_ops.use_database_isolated(database)
+            
+            # Handle schema context
+            if schema:
+                await db_ops.use_schema_isolated(schema)
+            else:
+                # Get current schema in this isolated context
+                _, current_schema = await db_ops.get_current_context()
+                schema = current_schema
+
+            # Execute views query in isolated context
+            results, _ = await db_ops.execute_query_isolated(f"SHOW VIEWS IN {database}.{schema}")
+
+            # Process results
+            views = []
+            for row in results:
+                view_name = row[1]
+                created_on = row[5]
+                views.append(f"{view_name} (created: {created_on})")
+
+            if views:
+                return [
+                    mcp_types.TextContent(
+                        type="text",
+                        text=f"Views in {database}.{schema}:\n" + "\n".join(views),
+                    )
+                ]
             else:
                 return [
                     mcp_types.TextContent(
-                        type="text", text="Error: Could not determine current schema"
+                        type="text", text=f"No views found in {database}.{schema}"
                     )
                 ]
 
-        # Execute query to list views
-        cursor = conn.cursor()
-        cursor.execute(f"SHOW VIEWS IN {database}.{schema}")
-
-        # Process results
-        views = []
-        for row in cursor:
-            view_name = row[1]  # View name is in the second column
-            created_on = row[5]  # Creation date
-            views.append(f"{view_name} (created: {created_on})")
-
-        cursor.close()
-        # Don't close the connection, just the cursor
-
-        if views:
-            return [
-                mcp_types.TextContent(
-                    type="text",
-                    text=f"Views in {database}.{schema}:\n" + "\n".join(views),
-                )
-            ]
-        else:
-            return [
-                mcp_types.TextContent(
-                    type="text", text=f"No views found in {database}.{schema}"
-                )
-            ]
-
     except Exception as e:
+        logger.error(f"Error listing views: {e}")
         return [
             mcp_types.TextContent(type="text", text=f"Error listing views: {str(e)}")
         ]
 
 
+@with_request_isolation("describe_view")
 async def handle_describe_view(
-    name: str, arguments: Optional[Dict[str, Any]] = None
+    name: str, 
+    arguments: Optional[Dict[str, Any]] = None,
+    request_ctx: RequestContext = None  # type: ignore
 ) -> Sequence[
     Union[mcp_types.TextContent, mcp_types.ImageContent, mcp_types.EmbeddedResource]
 ]:
-    """Tool handler to describe the structure of a view."""
+    """Tool handler to describe the structure of a view with isolation."""
     try:
-        # Get Snowflake connection from connection manager
-        conn = connection_manager.get_connection()
-
         # Extract arguments
         database = arguments.get("database") if arguments else None
         schema = arguments.get("schema") if arguments else None
@@ -217,79 +282,79 @@ async def handle_describe_view(
                 )
             ]
 
-        # Use the provided schema or use default schema
-        if schema:
-            full_view_name = f"{database}.{schema}.{view_name}"
-        else:
-            # Get the current schema
-            cursor = conn.cursor()
-            cursor.execute("SELECT CURRENT_SCHEMA()")
-            schema_result = cursor.fetchone()
-            if schema_result:
-                schema = schema_result[0]
+        async with get_isolated_database_ops(request_ctx) as db_ops:
+            # Set database context in isolation
+            await db_ops.use_database_isolated(database)
+            
+            # Use the provided schema or use default schema
+            if schema:
+                await db_ops.use_schema_isolated(schema)
                 full_view_name = f"{database}.{schema}.{view_name}"
+            else:
+                # Get the current schema
+                _, current_schema = await db_ops.get_current_context()
+                if current_schema and current_schema != "Unknown":
+                    schema = current_schema
+                    full_view_name = f"{database}.{schema}.{view_name}"
+                else:
+                    return [
+                        mcp_types.TextContent(
+                            type="text", text="Error: Could not determine current schema"
+                        )
+                    ]
+
+            # Execute query to describe view
+            describe_results, _ = await db_ops.execute_query_isolated(f"DESCRIBE VIEW {full_view_name}")
+
+            # Process column results
+            columns = []
+            for row in describe_results:
+                col_name = row[0]
+                col_type = row[1]
+                col_null = "NULL" if row[3] == "Y" else "NOT NULL"
+                columns.append(f"{col_name} : {col_type} {col_null}")
+
+            # Get view definition
+            ddl_results, _ = await db_ops.execute_query_isolated(f"SELECT GET_DDL('VIEW', '{full_view_name}')")
+            view_ddl = ddl_results[0][0] if ddl_results and ddl_results[0] else "Definition not available"
+
+            if columns:
+                result = f"## View: {full_view_name}\n\n"
+                result += f"Request ID: {request_ctx.request_id}\n\n"
+                result += "### Columns:\n"
+                for col in columns:
+                    result += f"- {col}\n"
+
+                result += "\n### View Definition:\n```sql\n"
+                result += view_ddl
+                result += "\n```"
+
+                return [mcp_types.TextContent(type="text", text=result)]
             else:
                 return [
                     mcp_types.TextContent(
-                        type="text", text="Error: Could not determine current schema"
+                        type="text",
+                        text=f"View {full_view_name} not found or you don't have permission to access it.",
                     )
                 ]
 
-        # Execute query to describe view
-        cursor = conn.cursor()
-        cursor.execute(f"DESCRIBE VIEW {full_view_name}")
-
-        # Process results
-        columns = []
-        for row in cursor:
-            col_name = row[0]
-            col_type = row[1]
-            col_null = "NULL" if row[3] == "Y" else "NOT NULL"
-            columns.append(f"{col_name} : {col_type} {col_null}")
-
-        # Get view definition
-        cursor.execute(f"SELECT GET_DDL('VIEW', '{full_view_name}')")
-        view_ddl_result = cursor.fetchone()
-        view_ddl = view_ddl_result[0] if view_ddl_result else "Definition not available"
-
-        cursor.close()
-        # Don't close the connection, just the cursor
-
-        if columns:
-            result = f"## View: {full_view_name}\n\n"
-            result += "### Columns:\n"
-            for col in columns:
-                result += f"- {col}\n"
-
-            result += "\n### View Definition:\n```sql\n"
-            result += view_ddl
-            result += "\n```"
-
-            return [mcp_types.TextContent(type="text", text=result)]
-        else:
-            return [
-                mcp_types.TextContent(
-                    type="text",
-                    text=f"View {full_view_name} not found or you don't have permission to access it.",
-                )
-            ]
-
     except Exception as e:
+        logger.error(f"Error describing view: {e}")
         return [
             mcp_types.TextContent(type="text", text=f"Error describing view: {str(e)}")
         ]
 
 
+@with_request_isolation("query_view")
 async def handle_query_view(
-    name: str, arguments: Optional[Dict[str, Any]] = None
+    name: str, 
+    arguments: Optional[Dict[str, Any]] = None,
+    request_ctx: RequestContext = None  # type: ignore
 ) -> Sequence[
     Union[mcp_types.TextContent, mcp_types.ImageContent, mcp_types.EmbeddedResource]
 ]:
-    """Tool handler to query data from a view with optional limit."""
+    """Tool handler to query data from a view with isolation."""
     try:
-        # Get Snowflake connection from connection manager
-        conn = connection_manager.get_connection()
-
         # Extract arguments
         database = arguments.get("database") if arguments else None
         schema = arguments.get("schema") if arguments else None
@@ -308,83 +373,79 @@ async def handle_query_view(
                 )
             ]
 
-        # Use the provided schema or use default schema
-        if schema:
-            full_view_name = f"{database}.{schema}.{view_name}"
-        else:
-            # Get the current schema
-            cursor = conn.cursor()
-            cursor.execute("SELECT CURRENT_SCHEMA()")
-            schema_result = cursor.fetchone()
-            if schema_result:
-                schema = schema_result[0]
+        async with get_isolated_database_ops(request_ctx) as db_ops:
+            # Set database context in isolation
+            await db_ops.use_database_isolated(database)
+            
+            # Use the provided schema or use default schema
+            if schema:
+                await db_ops.use_schema_isolated(schema)
                 full_view_name = f"{database}.{schema}.{view_name}"
+            else:
+                # Get the current schema
+                _, current_schema = await db_ops.get_current_context()
+                if current_schema and current_schema != "Unknown":
+                    schema = current_schema
+                    full_view_name = f"{database}.{schema}.{view_name}"
+                else:
+                    return [
+                        mcp_types.TextContent(
+                            type="text", text="Error: Could not determine current schema"
+                        )
+                    ]
+
+            # Execute query to get data from view
+            rows, column_names = await db_ops.execute_query_limited(f"SELECT * FROM {full_view_name}", limit)
+
+            if rows:
+                # Format the results as a markdown table
+                result = f"## Data from {full_view_name} (Showing {len(rows)} rows)\n\n"
+                result += f"Request ID: {request_ctx.request_id}\n\n"
+
+                # Create header row
+                result += "| " + " | ".join(column_names) + " |\n"
+                result += "| " + " | ".join(["---" for _ in column_names]) + " |\n"
+
+                # Add data rows
+                for row in rows:
+                    formatted_values = []
+                    for val in row:
+                        if val is None:
+                            formatted_values.append("NULL")
+                        else:
+                            # Format the value as string and escape any pipe characters
+                            val_str = str(val).replace("|", "\\|")
+                            if len(val_str) > 200:  # Truncate long values
+                                val_str = val_str[:197] + "..."
+                            formatted_values.append(val_str)
+                    result += "| " + " | ".join(formatted_values) + " |\n"
+
+                return [mcp_types.TextContent(type="text", text=result)]
             else:
                 return [
                     mcp_types.TextContent(
-                        type="text", text="Error: Could not determine current schema"
+                        type="text",
+                        text=f"No data found in view {full_view_name} or the view is empty.",
                     )
                 ]
 
-        # Execute query to get data from view
-        cursor = conn.cursor()
-        cursor.execute(f"SELECT * FROM {full_view_name} LIMIT {limit}")
-
-        # Get column names
-        column_names = (
-            [col[0] for col in cursor.description] if cursor.description else []
-        )
-
-        # Process results
-        rows = cursor.fetchall()
-
-        cursor.close()
-        # Don't close the connection, just the cursor
-
-        if rows:
-            # Format the results as a markdown table
-            result = f"## Data from {full_view_name} (Showing {len(rows)} rows)\n\n"
-
-            # Create header row
-            result += "| " + " | ".join(column_names) + " |\n"
-            result += "| " + " | ".join(["---" for _ in column_names]) + " |\n"
-
-            # Add data rows
-            for row in rows:
-                formatted_values = []
-                for val in row:
-                    if val is None:
-                        formatted_values.append("NULL")
-                    else:
-                        # Format the value as string and escape any pipe characters
-                        formatted_values.append(str(val).replace("|", "\\|"))
-                result += "| " + " | ".join(formatted_values) + " |\n"
-
-            return [mcp_types.TextContent(type="text", text=result)]
-        else:
-            return [
-                mcp_types.TextContent(
-                    type="text",
-                    text=f"No data found in view {full_view_name} or the view is empty.",
-                )
-            ]
-
     except Exception as e:
+        logger.error(f"Error querying view: {e}")
         return [
             mcp_types.TextContent(type="text", text=f"Error querying view: {str(e)}")
         ]
 
 
+@with_request_isolation("execute_query")
 async def handle_execute_query(
-    name: str, arguments: Optional[Dict[str, Any]] = None
+    name: str, 
+    arguments: Optional[Dict[str, Any]] = None,
+    request_ctx: RequestContext = None  # type: ignore
 ) -> Sequence[
     Union[mcp_types.TextContent, mcp_types.ImageContent, mcp_types.EmbeddedResource]
 ]:
-    """Tool handler to execute read-only SQL queries against Snowflake."""
+    """Tool handler to execute read-only SQL queries with complete isolation."""
     try:
-        # Get Snowflake connection from connection manager
-        conn = connection_manager.get_connection()
-
         # Extract arguments
         query = arguments.get("query") if arguments else None
         database = arguments.get("database") if arguments else None
@@ -394,6 +455,10 @@ async def handle_execute_query(
             if arguments and arguments.get("limit") is not None
             else 100
         )  # Default limit to 100 rows
+        
+        # Transaction control parameters (for read-only operations)
+        use_transaction = arguments.get("use_transaction", False) if arguments else False
+        auto_commit = arguments.get("auto_commit", True) if arguments else True
 
         if not query:
             return [
@@ -429,66 +494,66 @@ async def handle_execute_query(
                 )
             ]
 
-        # Use the specified database and schema if provided
-        if database:
-            conn.cursor().execute(f"USE DATABASE {database}")
-        if schema:
-            conn.cursor().execute(f"USE SCHEMA {schema}")
+        # Choose appropriate database operations based on transaction requirements
+        if use_transaction:
+            async with get_transactional_database_ops(request_ctx) as db_ops:
+                # Set database and schema context in isolation
+                if database:
+                    await db_ops.use_database_isolated(database)
+                if schema:
+                    await db_ops.use_schema_isolated(schema)
 
-        # Extract database and schema context info for logging/display
-        context_cursor = conn.cursor()
-        context_cursor.execute("SELECT CURRENT_DATABASE(), CURRENT_SCHEMA()")
-        context_result = context_cursor.fetchone()
-        if context_result:
-            current_db, current_schema = context_result
+                # Get current context for display
+                current_db, current_schema = await db_ops.get_current_context()
+
+                # Add LIMIT clause if not present
+                if "LIMIT " not in query.upper():
+                    query = query.rstrip().rstrip(";")
+                    query = f"{query} LIMIT {limit_rows};"
+
+                # Execute query with transaction control
+                rows, column_names = await db_ops.execute_with_transaction(query, auto_commit)
         else:
-            current_db, current_schema = "Unknown", "Unknown"
-        context_cursor.close()
+            async with get_isolated_database_ops(request_ctx) as db_ops:
+                # Set database and schema context in isolation
+                if database:
+                    await db_ops.use_database_isolated(database)
+                if schema:
+                    await db_ops.use_schema_isolated(schema)
 
-        # Ensure the query has a LIMIT clause to prevent large result sets
-        # Parse the query to check if it already has a LIMIT
-        if "LIMIT " not in query.upper():
-            # Remove any trailing semicolon before adding the LIMIT clause
-            query = query.rstrip().rstrip(";")
-            query = f"{query} LIMIT {limit_rows};"
+                # Get current context for display
+                current_db, current_schema = await db_ops.get_current_context()
 
-        # Execute the query
-        cursor = conn.cursor()
-        cursor.execute(query)
+                # Add LIMIT clause if not present
+                if "LIMIT " not in query.upper():
+                    query = query.rstrip().rstrip(";")
+                    query = f"{query} LIMIT {limit_rows};"
 
-        # Get column names and types
-        column_names = (
-            [col[0] for col in cursor.description] if cursor.description else []
-        )
-
-        # Fetch only up to limit_rows
-        rows = cursor.fetchmany(limit_rows)
-        row_count = len(rows) if rows else 0
-
-        cursor.close()
-        # Don't close the connection, just the cursor
+                # Execute query in isolated context (default auto-commit behavior)
+                rows, column_names = await db_ops.execute_query_isolated(query)
 
         if rows:
-            # Format the results as a markdown table
+            # Format results
             result = f"## Query Results (Database: {current_db}, Schema: {current_schema})\n\n"
-            result += f"Showing {row_count} row{'s' if row_count != 1 else ''}\n\n"
+            result += f"Request ID: {request_ctx.request_id}\n"
+            if use_transaction:
+                result += f"Transaction Mode: {'Auto-commit' if auto_commit else 'Explicit'}\n"
+            result += f"Showing {len(rows)} row{'s' if len(rows) != 1 else ''}\n\n"
             result += f"```sql\n{query}\n```\n\n"
 
             # Create header row
             result += "| " + " | ".join(column_names) + " |\n"
             result += "| " + " | ".join(["---" for _ in column_names]) + " |\n"
 
-            # Add data rows
+            # Add data rows with truncation
             for row in rows:
                 formatted_values = []
                 for val in row:
                     if val is None:
                         formatted_values.append("NULL")
                     else:
-                        # Format the value as string and escape any pipe characters
-                        # Truncate very long values to prevent huge tables
                         val_str = str(val).replace("|", "\\|")
-                        if len(val_str) > 200:  # Truncate long values
+                        if len(val_str) > 200:
                             val_str = val_str[:197] + "..."
                         formatted_values.append(val_str)
                 result += "| " + " | ".join(formatted_values) + " |\n"
@@ -498,11 +563,12 @@ async def handle_execute_query(
             return [
                 mcp_types.TextContent(
                     type="text",
-                    text=f"Query executed successfully in {current_db}.{current_schema}, but returned no results.",
+                    text="Query completed successfully but returned no results.",
                 )
             ]
 
     except Exception as e:
+        logger.error(f"Error executing query: {e}")
         return [
             mcp_types.TextContent(type="text", text=f"Error executing query: {str(e)}")
         ]
@@ -513,6 +579,12 @@ def run_stdio_server() -> None:
     """Run the MCP server using stdin/stdout for communication."""
 
     async def run() -> None:
+        # Set up contextual logging first
+        setup_server_logging()
+        
+        # Initialize async infrastructure
+        await initialize_async_infrastructure()
+        
         server = create_server()
 
         # Register all the Snowflake tools
@@ -618,7 +690,7 @@ def run_stdio_server() -> None:
                 ),
                 mcp_types.Tool(
                     name="execute_query",
-                    description="Execute a read-only SQL query against Snowflake",
+                    description="Execute a read-only SQL query against Snowflake with optional transaction control",
                     inputSchema={
                         "type": "object",
                         "properties": {
@@ -638,6 +710,14 @@ def run_stdio_server() -> None:
                                 "type": "integer",
                                 "description": "Maximum number of rows to return (default: 100)",
                             },
+                            "use_transaction": {
+                                "type": "boolean",
+                                "description": "Enable transaction boundary management for this query (default: false)",
+                            },
+                            "auto_commit": {
+                                "type": "boolean", 
+                                "description": "Auto-commit transaction when use_transaction is true (default: true)",
+                            },
                         },
                         "required": ["query"],
                     },
@@ -650,3 +730,77 @@ def run_stdio_server() -> None:
             await server.run(read_stream, write_stream, init_options)
 
     anyio.run(run)
+
+
+def run_http_server() -> None:
+    """Run the HTTP/WebSocket MCP server."""
+    # Parse command line arguments for host and port
+    import sys
+
+    from snowflake_mcp_server.transports.http_server import (
+        run_http_server as _run_http_server,
+    )
+    
+    host = "0.0.0.0"
+    port = 8000
+    
+    # Simple argument parsing
+    args = sys.argv[1:]
+    for i, arg in enumerate(args):
+        if arg == "--host" and i + 1 < len(args):
+            host = args[i + 1]
+        elif arg == "--port" and i + 1 < len(args):
+            port = int(args[i + 1])
+    
+    logger.info(f"Starting Snowflake MCP HTTP server on {host}:{port}")
+    _run_http_server(host, port)
+
+
+async def get_available_tools() -> List[Dict[str, Any]]:
+    """Get list of available MCP tools for HTTP API."""
+    return [
+        {
+            "name": "list_databases",
+            "description": "List all accessible Snowflake databases",
+            "parameters": {}
+        },
+        {
+            "name": "list_views", 
+            "description": "List all views in a specified database and schema",
+            "parameters": {
+                "database": {"type": "string", "required": True},
+                "schema": {"type": "string", "required": False}
+            }
+        },
+        {
+            "name": "describe_view",
+            "description": "Get detailed information about a specific view including columns and SQL definition",
+            "parameters": {
+                "database": {"type": "string", "required": True},
+                "view_name": {"type": "string", "required": True},
+                "schema": {"type": "string", "required": False}
+            }
+        },
+        {
+            "name": "query_view",
+            "description": "Query data from a specific view with optional limit",
+            "parameters": {
+                "database": {"type": "string", "required": True},
+                "view_name": {"type": "string", "required": True},
+                "schema": {"type": "string", "required": False},
+                "limit": {"type": "integer", "required": False}
+            }
+        },
+        {
+            "name": "execute_query",
+            "description": "Execute a read-only SQL query against Snowflake with optional transaction control",
+            "parameters": {
+                "query": {"type": "string", "required": True},
+                "database": {"type": "string", "required": False},
+                "schema": {"type": "string", "required": False},
+                "limit": {"type": "integer", "required": False},
+                "use_transaction": {"type": "boolean", "required": False},
+                "auto_commit": {"type": "boolean", "required": False}
+            }
+        }
+    ]

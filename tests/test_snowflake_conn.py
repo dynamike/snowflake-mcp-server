@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
-
 from mcp_server_snowflake.utils.snowflake_conn import (
     AuthType,
     SnowflakeConfig,

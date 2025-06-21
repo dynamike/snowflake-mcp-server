@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: snowflake-mcp-service-account
+  namespace: snowflake-mcp
+  labels:
+    app: snowflake-mcp-server
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: snowflake-mcp-role
+  namespace: snowflake-mcp
+rules:
+- apiGroups: [""]
+  resources: ["configmaps", "secrets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: snowflake-mcp-role-binding
+  namespace: snowflake-mcp
+subjects:
+- kind: ServiceAccount
+  name: snowflake-mcp-service-account
+  namespace: snowflake-mcp
+roleRef:
+  kind: Role
+  name: snowflake-mcp-role
+  apiGroup: rbac.authorization.k8s.io
