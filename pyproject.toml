@@ -16,12 +16,25 @@ dependencies = [
     "cryptography>=41.0.0",
     "mcp",
     "anyio>=3.7.1",
-    "sqlglot>=11.5.5"
+    "sqlglot>=11.5.5",
+    "asyncpg>=0.28.0",
+    "asyncio-pool>=0.6.0",
+    "aiofiles>=23.2.0",
+    "fastapi>=0.115.13",
+    "uvicorn>=0.34.0",
+    "websockets>=15.0.1",
+    "python-multipart>=0.0.20",
+    "httpx>=0.28.1",
+    "prometheus-client>=0.22.1",
+    "structlog>=25.4.0",
+    "tenacity>=9.1.2",
+    "slowapi>=0.1.9",
 ]
 
 [project.scripts]
 snowflake-mcp = "snowflake_mcp_server.main:run_stdio_server"
 snowflake-mcp-stdio = "snowflake_mcp_server.main:run_stdio_server"
+snowflake-mcp-http = "snowflake_mcp_server.main:run_http_server"
 
 [project.optional-dependencies]
 dev = [
@@ -47,3 +60,8 @@ disallow_incomplete_defs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest-asyncio>=1.0.0",
+]

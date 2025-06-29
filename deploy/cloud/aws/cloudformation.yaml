@@ -1,0 +1,440 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Snowflake MCP Server deployment on AWS ECS with Fargate'
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC where the ECS cluster will be deployed
+  
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets for the ECS service (recommend private subnets)
+  
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Public subnets for the Application Load Balancer
+  
+  SnowflakeAccount:
+    Type: String
+    Description: Snowflake account identifier
+    NoEcho: true
+  
+  SnowflakeUser:
+    Type: String
+    Description: Snowflake username
+    NoEcho: true
+  
+  SnowflakePassword:
+    Type: String
+    Description: Snowflake password
+    NoEcho: true
+  
+  SnowflakeWarehouse:
+    Type: String
+    Description: Snowflake warehouse name
+  
+  SnowflakeDatabase:
+    Type: String
+    Description: Snowflake database name
+  
+  SnowflakeSchema:
+    Type: String
+    Description: Snowflake schema name
+    Default: PUBLIC
+  
+  ImageTag:
+    Type: String
+    Description: Docker image tag for the Snowflake MCP Server
+    Default: latest
+  
+  DesiredCount:
+    Type: Number
+    Description: Desired number of ECS tasks
+    Default: 2
+    MinValue: 1
+    MaxValue: 10
+
+Resources:
+  # ECS Cluster
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${AWS::StackName}-cluster"
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 2
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  # Security Group for ECS Tasks
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Snowflake MCP Server ECS tasks
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: HTTP API from ALB
+        - IpProtocol: tcp
+          FromPort: 8001
+          ToPort: 8001
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: Metrics from ALB
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: All outbound traffic
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-ecs-sg"
+
+  # Security Group for Application Load Balancer
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Application Load Balancer
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: All outbound traffic
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-alb-sg"
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${AWS::StackName}-alb"
+      Scheme: internet-facing
+      Type: application
+      Subnets: !Ref PublicSubnetIds
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-alb"
+
+  # Target Group for HTTP API
+  HTTPTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${AWS::StackName}-http-tg"
+      Port: 8000
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: 8000
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-http-tg"
+
+  # Target Group for Metrics
+  MetricsTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${AWS::StackName}-metrics-tg"
+      Port: 8001
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckPath: /metrics
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: 8001
+      HealthCheckIntervalSeconds: 60
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-metrics-tg"
+
+  # ALB Listener for HTTP
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref HTTPTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # ALB Listener Rule for Metrics
+  MetricsListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref MetricsTargetGroup
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - '/metrics*'
+      ListenerArn: !Ref HTTPListener
+      Priority: 100
+
+  # CloudWatch Log Group
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${AWS::StackName}"
+      RetentionInDays: 30
+
+  # ECS Task Execution Role
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref SnowflakeCredentialsSecret
+
+  # ECS Task Role
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchMetrics
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  # Secrets Manager Secret for Snowflake credentials
+  SnowflakeCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${AWS::StackName}/snowflake-credentials"
+      Description: Snowflake connection credentials for MCP Server
+      SecretString: !Sub |
+        {
+          "SNOWFLAKE_ACCOUNT": "${SnowflakeAccount}",
+          "SNOWFLAKE_USER": "${SnowflakeUser}",
+          "SNOWFLAKE_PASSWORD": "${SnowflakePassword}",
+          "SNOWFLAKE_WAREHOUSE": "${SnowflakeWarehouse}",
+          "SNOWFLAKE_DATABASE": "${SnowflakeDatabase}",
+          "SNOWFLAKE_SCHEMA": "${SnowflakeSchema}"
+        }
+
+  # ECS Task Definition
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${AWS::StackName}-task"
+      Cpu: 1024
+      Memory: 2048
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !Ref ECSTaskExecutionRole
+      TaskRoleArn: !Ref ECSTaskRole
+      ContainerDefinitions:
+        - Name: snowflake-mcp-server
+          Image: !Sub "your-ecr-repo/snowflake-mcp-server:${ImageTag}"
+          Cpu: 1024
+          Memory: 2048
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8000
+              Protocol: tcp
+              Name: http
+            - ContainerPort: 8001
+              Protocol: tcp
+              Name: metrics
+          Environment:
+            - Name: MCP_SERVER_HOST
+              Value: "0.0.0.0"
+            - Name: MCP_SERVER_PORT
+              Value: "8000"
+            - Name: LOG_LEVEL
+              Value: "INFO"
+            - Name: CONNECTION_POOL_MIN_SIZE
+              Value: "3"
+            - Name: CONNECTION_POOL_MAX_SIZE
+              Value: "10"
+            - Name: ENABLE_MONITORING
+              Value: "true"
+            - Name: METRICS_PORT
+              Value: "8001"
+            - Name: ENABLE_RATE_LIMITING
+              Value: "true"
+            - Name: RATE_LIMIT_REQUESTS_PER_MINUTE
+              Value: "120"
+          Secrets:
+            - Name: SNOWFLAKE_ACCOUNT
+              ValueFrom: !Sub "${SnowflakeCredentialsSecret}:SNOWFLAKE_ACCOUNT::"
+            - Name: SNOWFLAKE_USER
+              ValueFrom: !Sub "${SnowflakeCredentialsSecret}:SNOWFLAKE_USER::"
+            - Name: SNOWFLAKE_PASSWORD
+              ValueFrom: !Sub "${SnowflakeCredentialsSecret}:SNOWFLAKE_PASSWORD::"
+            - Name: SNOWFLAKE_WAREHOUSE
+              ValueFrom: !Sub "${SnowflakeCredentialsSecret}:SNOWFLAKE_WAREHOUSE::"
+            - Name: SNOWFLAKE_DATABASE
+              ValueFrom: !Sub "${SnowflakeCredentialsSecret}:SNOWFLAKE_DATABASE::"
+            - Name: SNOWFLAKE_SCHEMA
+              ValueFrom: !Sub "${SnowflakeCredentialsSecret}:SNOWFLAKE_SCHEMA::"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - "curl -f http://localhost:8000/health || exit 1"
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+
+  # ECS Service
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: HTTPListener
+    Properties:
+      ServiceName: !Sub "${AWS::StackName}-service"
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref ECSTaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+          Subnets: !Ref SubnetIds
+      LoadBalancers:
+        - ContainerName: snowflake-mcp-server
+          ContainerPort: 8000
+          TargetGroupArn: !Ref HTTPTargetGroup
+        - ContainerName: snowflake-mcp-server
+          ContainerPort: 8001
+          TargetGroupArn: !Ref MetricsTargetGroup
+      HealthCheckGracePeriodSeconds: 120
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 50
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      ServiceTags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-service"
+
+  # Auto Scaling Target
+  ServiceScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 10
+      MinCapacity: 1
+      ResourceId: !Sub "service/${ECSCluster}/${ECSService.Name}"
+      RoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  # Auto Scaling Policy - CPU
+  ServiceScalingPolicyCPU:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${AWS::StackName}-cpu-scaling"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ServiceScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 70.0
+        ScaleOutCooldown: 300
+        ScaleInCooldown: 300
+
+  # Auto Scaling Policy - Memory
+  ServiceScalingPolicyMemory:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${AWS::StackName}-memory-scaling"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ServiceScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        TargetValue: 80.0
+        ScaleOutCooldown: 300
+        ScaleInCooldown: 300
+
+Outputs:
+  LoadBalancerURL:
+    Description: URL of the Application Load Balancer
+    Value: !Sub "http://${ApplicationLoadBalancer.DNSName}"
+    Export:
+      Name: !Sub "${AWS::StackName}-LoadBalancerURL"
+  
+  MetricsURL:
+    Description: URL for Prometheus metrics
+    Value: !Sub "http://${ApplicationLoadBalancer.DNSName}/metrics"
+    Export:
+      Name: !Sub "${AWS::StackName}-MetricsURL"
+  
+  ECSClusterName:
+    Description: Name of the ECS Cluster
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSCluster"
+  
+  ServiceName:
+    Description: Name of the ECS Service
+    Value: !GetAtt ECSService.Name
+    Export:
+      Name: !Sub "${AWS::StackName}-ServiceName"

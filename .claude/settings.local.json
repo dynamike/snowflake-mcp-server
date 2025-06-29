@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep:*)",
+      "Bash(python:*)",
+      "Bash(find:*)",
+      "Bash(uv pip install:*)",
+      "Bash(ruff check:*)",
+      "Bash(uv run ruff:*)",
+      "Bash(uv run:*)",
+      "Bash(uv add:*)",
+      "Bash(mkdir:*)",
+      "Bash(chmod:*)",
+      "Bash(timeout:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git checkout:*)"
+    ],
+    "deny": []
+  }
+}

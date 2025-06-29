@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: snowflake-mcp
+  labels:
+    name: snowflake-mcp
+    app.kubernetes.io/name: snowflake-mcp-server
+    app.kubernetes.io/version: "1.0.0"

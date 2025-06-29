@@ -8,7 +8,6 @@ a starting point when adding new functionality to query Snowflake.
 from typing import Any, Dict, List
 
 import mcp.types as mcp_types
-
 from mcp_server_snowflake.main import get_snowflake_config
 from mcp_server_snowflake.utils.snowflake_conn import (
     get_snowflake_connection,

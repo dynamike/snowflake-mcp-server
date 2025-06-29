@@ -1,0 +1,69 @@
+# Prometheus configuration for Snowflake MCP Server monitoring
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'snowflake-mcp'
+    replica: 'prometheus-1'
+
+rule_files:
+  - "rules/*.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          # - alertmanager:9093
+
+scrape_configs:
+  # Snowflake MCP Server metrics
+  - job_name: 'snowflake-mcp-server'
+    static_configs:
+      - targets: ['snowflake-mcp:8001']
+    metrics_path: /metrics
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    honor_labels: true
+    params:
+      format: ['prometheus']
+
+  # Health check monitoring
+  - job_name: 'snowflake-mcp-health'
+    static_configs:
+      - targets: ['snowflake-mcp:8000']
+    metrics_path: /health
+    scrape_interval: 60s
+    scrape_timeout: 5s
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+    scrape_interval: 30s
+
+  # Node exporter for system metrics (if available)
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+    scrape_interval: 30s
+
+  # Docker container metrics (if using cAdvisor)
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+    scrape_interval: 30s
+
+# Storage configuration
+storage:
+  tsdb:
+    path: /prometheus/
+    retention.time: 15d
+    retention.size: 50GB
+    wal-compression: true
+
+# Performance tuning
+query:
+  timeout: 2m
+  max_concurrency: 20
+  max_samples: 50000000

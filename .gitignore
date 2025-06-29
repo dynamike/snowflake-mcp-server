@@ -92,3 +92,35 @@ dmypy.json
 
 # Ruff
 .ruff_cache/
+
+# Claude Code IDE
+.claude/
+CLAUDE.md
+
+# Credentials and secrets
+.credentials/
+credentials/
+*.credentials
+.secret/
+secrets/
+*.secret
+
+# Logs
+logs/
+*.log
+log/
+
+# Node.js (PM2)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# PM2
+.pm2/
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock

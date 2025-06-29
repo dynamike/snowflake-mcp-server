@@ -1,0 +1,52 @@
+[Unit]
+Description=Snowflake MCP Server (stdio)
+Documentation=https://github.com/your-org/snowflake-mcp-server
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=snowflake-mcp
+Group=snowflake-mcp
+WorkingDirectory=/opt/snowflake-mcp-server
+Environment=PATH=/opt/snowflake-mcp-server/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONPATH=/opt/snowflake-mcp-server
+Environment=NODE_ENV=production
+EnvironmentFile=-/opt/snowflake-mcp-server/.env
+
+# Service execution
+ExecStart=/opt/snowflake-mcp-server/.venv/bin/uv run snowflake-mcp-stdio
+ExecStop=/bin/kill -TERM $MAINPID
+
+# Service management - stdio typically runs on-demand, not as daemon
+Restart=no
+RemainAfterExit=no
+
+# Security settings
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/snowflake-mcp-server/logs
+ReadWritePaths=/tmp
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+
+# Process limits
+LimitNOFILE=65536
+LimitNPROC=32768
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=snowflake-mcp-stdio
+
+[Install]
+WantedBy=multi-user.target

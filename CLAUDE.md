@@ -1,28 +1,82 @@
-# CLAUDE.md - MCP Server Snowflake (Python)
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+This is a Model Context Protocol (MCP) server for Snowflake that enables Claude to perform read-only operations against Snowflake databases. The server is built with Python 3.12+ and uses stdio-based communication for integration with Claude Desktop.
 
 ## Build & Run Commands
-- Setup: `uv pip install -e .` or `uv pip install -r requirements.txt`
-- Start server: `python -m mcp_server_snowflake.main`
-- Development mode: `uvicorn mcp_server_snowflake.main:app --reload`
+- Setup: `uv pip install -e .`
+- Start server: `uv run snowflake-mcp` or `uv run snowflake-mcp-stdio`
+- Alternative: `python -m snowflake_mcp_server.main`
 
 ## Test Commands
 - Run all tests: `pytest`
 - Run single test: `pytest tests/test_file.py::test_function`
-- Test coverage: `pytest --cov=mcp_server_snowflake`
+- Test coverage: `pytest --cov=snowflake_mcp_server`
 
 ## Lint & Format
 - Lint: `ruff check .`
 - Format code: `ruff format .`
-- Type check: `mypy mcp_server_snowflake/`
+- Type check: `mypy snowflake_mcp_server/`
+
+## Architecture Overview
+
+### Core Components
+- **snowflake_mcp_server/main.py**: Main MCP server implementation with tool handlers for database operations (list_databases, list_views, describe_view, query_view, execute_query)
+- **snowflake_mcp_server/utils/snowflake_conn.py**: Connection management with singleton pattern, authentication handling, and background connection refresh
+- **snowflake_mcp_server/utils/template.py**: Template utilities for SQL query formatting
+
+### Authentication System
+The server supports two authentication methods:
+- **Private Key Auth**: Service account with RSA private key (non-interactive)
+- **External Browser Auth**: Interactive browser-based authentication
+
+Configuration is managed through environment variables loaded from `.env` files with examples provided for both auth types.
+
+### Connection Management
+Uses `SnowflakeConnectionManager` singleton for:
+- Persistent connection pooling with configurable refresh intervals (default 8 hours)
+- Background connection health monitoring and automatic reconnection
+- Thread-safe connection access with proper locking
+- Exponential backoff retry logic for connection failures
+
+### Security Features
+- Read-only operations enforced via SQL parsing with sqlglot
+- Automatic LIMIT clause injection to prevent large result sets
+- SQL injection prevention through parameterized queries
+- Input validation using Pydantic models
+
+### MCP Tools Available
+- `list_databases`: List accessible Snowflake databases
+- `list_views`: List views in specified database/schema
+- `describe_view`: Get view structure and DDL definition
+- `query_view`: Query view data with optional row limits
+- `execute_query`: Execute custom read-only SQL with result formatting
+
+## Configuration
+- Environment variables in `.env` file for Snowflake credentials
+- Connection refresh interval configurable via `SNOWFLAKE_CONN_REFRESH_HOURS`
+- Default query limits: 10 rows for view queries, 100 rows for custom queries
+- See `CONFIGURATION_GUIDE.md` for detailed configuration options
+
+## Documentation Structure
+- **Root Directory**: Setup, configuration, and migration guides
+  - `CONFIGURATION_GUIDE.md` - Complete server configuration reference
+  - `MIGRATION_GUIDE.md` - Migration instructions and compatibility notes
+  - `README.md` - Project overview and quick start
+- **docs/**: Detailed documentation, operational guides, and development phases
+  - `OPERATIONS_RUNBOOK.md` - Production operations and troubleshooting
+  - `BACKUP_RECOVERY.md` - Backup and disaster recovery procedures
+  - `CAPACITY_PLANNING.md` - Scaling and capacity planning guide
+  - `SCALING_GUIDE.md` - Performance optimization and scaling strategies
+  - `PHASE2_COMPLETION_SUMMARY.md` - Enterprise upgrade completion summary
+  - `phase-breakdown/` - Detailed implementation phases and technical specifications
 
 ## Code Style Guidelines
-- Use Python 3.10+ type annotations everywhere
-- Format with Ruff, line length 88 characters
-- Organize imports with Ruff (stdlib, third-party, first-party)
-- Use async/await for Snowflake queries via snowflake-connector-python
-- Prefer dataclasses or Pydantic models for structured data
-- Follow PEP8 naming: snake_case for functions/variables, PascalCase for classes
-- Document public functions with docstrings (Google style preferred)
-- Handle database exceptions with proper logging and client-safe messages
-- Parameterize all SQL queries to prevent injection vulnerabilities
-- Use environment variables for configuration with pydantic-settings
+- Python 3.12+ with full type annotations
+- Ruff formatting with 88-character line length
+- Async/await pattern for all database operations
+- Pydantic models for configuration and data validation
+- Google-style docstrings for public functions
+- Exception handling with client-safe error messages
