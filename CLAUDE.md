@@ -58,6 +58,20 @@ Uses `SnowflakeConnectionManager` singleton for:
 - Environment variables in `.env` file for Snowflake credentials
 - Connection refresh interval configurable via `SNOWFLAKE_CONN_REFRESH_HOURS`
 - Default query limits: 10 rows for view queries, 100 rows for custom queries
+- See `CONFIGURATION_GUIDE.md` for detailed configuration options
+
+## Documentation Structure
+- **Root Directory**: Setup, configuration, and migration guides
+  - `CONFIGURATION_GUIDE.md` - Complete server configuration reference
+  - `MIGRATION_GUIDE.md` - Migration instructions and compatibility notes
+  - `README.md` - Project overview and quick start
+- **docs/**: Detailed documentation, operational guides, and development phases
+  - `OPERATIONS_RUNBOOK.md` - Production operations and troubleshooting
+  - `BACKUP_RECOVERY.md` - Backup and disaster recovery procedures
+  - `CAPACITY_PLANNING.md` - Scaling and capacity planning guide
+  - `SCALING_GUIDE.md` - Performance optimization and scaling strategies
+  - `PHASE2_COMPLETION_SUMMARY.md` - Enterprise upgrade completion summary
+  - `phase-breakdown/` - Detailed implementation phases and technical specifications
 
 ## Code Style Guidelines
 - Python 3.12+ with full type annotations
